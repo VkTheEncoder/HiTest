@@ -30,25 +30,23 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     query = ' '.join(context.args)
     try:
-        resp = requests.get(f"{API_BASE_URL}/search", params={'key': query})
+        # note the param name change: 'query'
+        resp = requests.get(
+            f"{API_BASE_URL}/search",
+            params={'query': query}
+        )
         resp.raise_for_status()
         raw = resp.json()
 
-        # Determine where the list lives
-        if isinstance(raw, list):
-            data_list = raw
-        elif isinstance(raw, dict) and isinstance(raw.get('data'), list):
-            data_list = raw['data']
-        elif isinstance(raw, dict) and isinstance(raw.get('data'), dict) \
-             and isinstance(raw['data'].get('data'), list):
-            data_list = raw['data']['data']
-        else:
-            data_list = []
+        # API wraps results in { success, data }
+        if not raw.get('success', False):
+            return await update.message.reply_text(f'No results for \"{query}\".')
 
-        if not data_list:
-            return await update.message.reply_text(f'No results for "{query}".')
+        data_list = raw.get('data', [])
+        if not isinstance(data_list, list) or not data_list:
+            return await update.message.reply_text(f'No results for \"{query}\".')
 
-        # Take top 5
+        # Show top 5
         top5 = data_list[:5]
         lines = [
             f"{i+1}. {anime.get('title','–')} (slug: {anime.get('id','–')})"
@@ -60,7 +58,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except Exception as e:
         logger.error("Search error: %s\nResponse was: %s",
-                     e, json.dumps(resp.json() if 'resp' in locals() else {}, indent=2))
+                     e, json.dumps(raw, indent=2))
         await update.message.reply_text('Error searching anime. Please try again.')
 
 # /get command
