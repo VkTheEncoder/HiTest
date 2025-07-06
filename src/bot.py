@@ -1,67 +1,67 @@
 import os
 import logging
-import json
 import requests
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Load environment variables
+# Load env vars
 load_dotenv()
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-API_BASE_URL = os.getenv('API_BASE_URL')
+BOT_TOKEN     = os.getenv('BOT_TOKEN')
+API_BASE_URL  = os.getenv('API_BASE_URL')
 
 if not BOT_TOKEN or not API_BASE_URL:
     print("Error: BOT_TOKEN and API_BASE_URL must be set in .env")
     exit(1)
 
-# Configure logging
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# /search command
+# === /search handler ===
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         return await update.message.reply_text('Usage: /search <anime name>')
 
     query = ' '.join(context.args)
+    raw = {}
+
+    # Call the API (no raise_for_status).
+    resp = requests.get(
+        f"{API_BASE_URL}/search",
+        params={'query': query}
+    )
+    # Try parsing JSON, even on 400/500
     try:
-        # note the param name change: 'query'
-        resp = requests.get(
-            f"{API_BASE_URL}/search",
-            params={'query': query}
-        )
-        resp.raise_for_status()
         raw = resp.json()
+    except ValueError:
+        raw = {}
 
-        # API wraps results in { success, data }
-        if not raw.get('success', False):
-            return await update.message.reply_text(f'No results for \"{query}\".')
+    # If the endpoint gave us a 400 or 500, show “no results”
+    if resp.status_code != 200 or not raw.get('success', False):
+        logger.error("Search failed (%s): %s", resp.status_code, raw)
+        return await update.message.reply_text(f'No results for \"{query}\".')
 
-        data_list = raw.get('data', [])
-        if not isinstance(data_list, list) or not data_list:
-            return await update.message.reply_text(f'No results for \"{query}\".')
+    # Pull the list out
+    data_list = raw.get('data', [])
+    if not isinstance(data_list, list) or not data_list:
+        return await update.message.reply_text(f'No results for \"{query}\".')
 
-        # Show top 5
-        top5 = data_list[:5]
-        lines = [
-            f"{i+1}. {anime.get('title','–')} (slug: {anime.get('id','–')})"
-            for i, anime in enumerate(top5)
-        ]
-        await update.message.reply_text(
-            f"Top results for '{query}':\n\n" + "\n".join(lines)
-        )
+    # Send top 5
+    top5 = data_list[:5]
+    lines = [
+        f"{i+1}. {item.get('title','–')} (slug: {item.get('id','–')})"
+        for i, item in enumerate(top5)
+    ]
+    await update.message.reply_text(
+        f"Top results for '{query}':\n\n" + "\n".join(lines)
+    )
 
-    except Exception as e:
-        logger.error("Search error: %s\nResponse was: %s",
-                     e, json.dumps(raw, indent=2))
-        await update.message.reply_text('Error searching anime. Please try again.')
-
-# /get command
+# === /get handler ===
 async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) < 2:
         return await update.message.reply_text('Usage: /get <animeSlug> <episodeNumber>')
@@ -73,7 +73,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return await update.message.reply_text('Episode number must be an integer.')
 
     try:
-        # 1. Episodes list
+        # 1. Episodes
         eps_res = requests.get(f"{API_BASE_URL}/episodes/{anime_slug}")
         eps_res.raise_for_status()
         episodes = eps_res.json()
@@ -86,8 +86,11 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f'Episode {ep_num} not found for {anime_slug}.'
             )
 
-        # 2. Servers list
-        srv_res = requests.get(f"{API_BASE_URL}/servers", params={'id': ep_item['id']})
+        # 2. Servers
+        srv_res = requests.get(
+            f"{API_BASE_URL}/servers",
+            params={'id': ep_item['id']}
+        )
         srv_res.raise_for_status()
         hd2 = next(
             (s for s in srv_res.json().get('sub', []) if s.get('name') == 'HD-2'),
@@ -96,7 +99,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not hd2:
             return await update.message.reply_text('HD-2 server not available.')
 
-        # 3. Stream + subtitles
+        # 3. Stream & subtitles
         str_res = requests.get(
             f"{API_BASE_URL}/stream",
             params={'id': ep_item['id'], 'server': hd2['name'], 'type': 'sub'}
@@ -104,13 +107,13 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         str_res.raise_for_status()
         data = str_res.json()
 
-        # Send download link
+        # Download link
         await update.message.reply_text(
             f"📥 *Download Link*:\n{data['streamingLink']}",
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Send subtitles
+        # Subtitles
         subs = data.get('subtitles', [])
         if subs:
             for sub in subs:
@@ -125,11 +128,10 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error("Get error: %s", e)
         await update.message.reply_text('An error occurred. Please try again later.')
 
-# Main entry point
+# === Main ===
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('search', search))
     app.add_handler(CommandHandler('get', get_episode))
-
     logger.info('Bot is starting...')
     app.run_polling()
