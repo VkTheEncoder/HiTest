@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  bot:
+    build: .
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_BASE_URL=${API_BASE_URL}
+    restart: unless-stopped
