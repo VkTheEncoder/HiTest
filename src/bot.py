@@ -6,9 +6,9 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Load env vars
-load_dotenv()
-BOT_TOKEN    = os.getenv('BOT_TOKEN')
+# Load environment variables
+t = load_dotenv()  # loads .env file
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 API_BASE_URL = os.getenv('API_BASE_URL')  # e.g. https://hiapitest.onrender.com/api/v1
 
 if not BOT_TOKEN or not API_BASE_URL:
@@ -22,28 +22,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === /search handler (unchanged) ===
+# /search command
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         return await update.message.reply_text('Usage: /search <anime name>')
 
     query = ' '.join(context.args)
-    # note: this API expects `keyword`
-    resp = requests.get(f"{API_BASE_URL}/search", params={'keyword': query})
-    raw = {}
     try:
+        resp = requests.get(
+            f"{API_BASE_URL}/search",
+            params={'keyword': query}
+        )
         raw = resp.json()
-    except ValueError:
-        pass
+    except Exception as e:
+        logger.error("Search HTTP error: %s", e)
+        return await update.message.reply_text('Error searching anime.')
 
-    if resp.status_code != 200 or not raw.get('success', False):
-        logger.error("Search failed (%s): %s", resp.status_code, raw)
+    # Handle API wrapper
+    if not raw.get('success'):
         return await update.message.reply_text(f'No results for "{query}".')
-
     results = raw.get('data', {}).get('response', [])
     if not isinstance(results, list) or not results:
         return await update.message.reply_text(f'No results for "{query}".')
 
+    # Top 5
     top5 = results[:5]
     lines = [
         f"{i+1}. {item.get('title','–')} (slug: {item.get('id','–')})"
@@ -53,94 +55,68 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Top results for '{query}':\n\n" + "\n".join(lines)
     )
 
-# === /get command (defensive JSON unwrapping) ===
+# /get command with positional indexing
 async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) < 2:
         return await update.message.reply_text(
             'Usage: /get <animeSlug> <episodeNumber>'
         )
 
-    # Clean up the slug (remove any ?ref=…)
-    raw_slug   = context.args[0]
+    # Clean the slug
+    raw_slug = context.args[0]
     anime_slug = raw_slug.split('?', 1)[0]
-
-    # Parse episode number
     try:
         ep_num = int(context.args[1])
     except ValueError:
         return await update.message.reply_text('Episode number must be an integer.')
 
-    # 1) Fetch the “episodes” endpoint
     try:
+        # 1) Episodes list
         eps_res = requests.get(f"{API_BASE_URL}/episodes/{anime_slug}")
-        # Try to parse JSON no matter what status code
-        try:
-            raw_eps = eps_res.json()
-        except ValueError:
-            logger.error("Could not JSON-decode episodes for %s: %s",
-                         anime_slug, eps_res.text[:200])
-            raise
+        eps_res.raise_for_status()
+        raw_eps = eps_res.json()
 
-        # Figure out where the episode array lives:
-        if isinstance(raw_eps, list):
-            episodes_list = raw_eps
-        elif isinstance(raw_eps, dict):
-            # { success: bool, data: [...] }
-            if raw_eps.get('success') and isinstance(raw_eps.get('data'), list):
-                episodes_list = raw_eps['data']
-            # { success: bool, data: { response: [...] } }
-            elif (raw_eps.get('success')
-                  and isinstance(raw_eps.get('data'), dict)
-                  and isinstance(raw_eps['data'].get('response'), list)):
-                episodes_list = raw_eps['data']['response']
-            # Maybe it’s directly { data: [...] }
-            elif isinstance(raw_eps.get('data'), list):
-                episodes_list = raw_eps['data']
+        # Unwrap JSON envelope
+        if isinstance(raw_eps, dict) and raw_eps.get('success'):
+            data = raw_eps.get('data', {})
+            if isinstance(data, list):
+                episodes_list = data
+            elif isinstance(data, dict) and isinstance(data.get('response'), list):
+                episodes_list = data['response']
             else:
-                # Last ditch: flatten any single‐level lists inside data
-                val = raw_eps.get('data')
-                episodes_list = val if isinstance(val, list) else []
+                episodes_list = []
+        elif isinstance(raw_eps, list):
+            episodes_list = raw_eps
         else:
             episodes_list = []
 
-        if not episodes_list:
-            return await update.message.reply_text(
-                f"No episodes found for \"{anime_slug}\"."
-            )
-
-        # Find the one matching “Episode {number}”
-        ep_item = next(
-            (e for e in episodes_list
-             if isinstance(e, dict)
-             and f"Episode {ep_num}" in e.get('title', "")),
-            None
-        )
-        if not ep_item:
+        # Validate index
+        if ep_num < 1 or ep_num > len(episodes_list):
             return await update.message.reply_text(
                 f'Episode {ep_num} not found for "{anime_slug}".'
             )
+        # Pick by order
+        ep_item = episodes_list[ep_num - 1]
 
-        # 2) Fetch servers
+        # 2) Servers
         srv_res = requests.get(
             f"{API_BASE_URL}/servers",
             params={'id': ep_item['id']}
         )
         srv_res.raise_for_status()
-        servers = srv_res.json().get('sub', [])
-        hd2 = next((s for s in servers if s.get('name') == 'HD-2'), None)
+        hd2 = next(
+            (s for s in srv_res.json().get('sub', []) if s.get('name') == 'HD-2'),
+            None
+        )
         if not hd2:
             return await update.message.reply_text(
                 'HD-2 server not available for this episode.'
             )
 
-        # 3) Fetch the stream + subtitles
+        # 3) Stream + subtitles
         str_res = requests.get(
             f"{API_BASE_URL}/stream",
-            params={
-                'id':     ep_item['id'],
-                'server': hd2['name'],
-                'type':   'sub'
-            }
+            params={'id': ep_item['id'], 'server': hd2['name'], 'type': 'sub'}
         )
         str_res.raise_for_status()
         stream_data = str_res.json()
@@ -151,12 +127,12 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Send any English subtitles
-        subs = stream_data.get('subtitles', [])
+        # Send subtitles
+        subs = stream_data.get('subtitles', []) or []
         if subs:
             for sub in subs:
                 await update.message.reply_text(
-                    f"💬 *Subtitle ({sub.get('lang','??')})*:\n{sub.get('src')}",
+                    f"💬 *Subtitle ({sub.get('lang','en')})*:\n{sub.get('src')}",
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
@@ -167,7 +143,8 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             'An error occurred while fetching the episode. Please try again later.'
         )
-# === Main ===
+
+# Main loop
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('search', search))
