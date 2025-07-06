@@ -8,8 +8,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Load env vars
 load_dotenv()
-BOT_TOKEN     = os.getenv('BOT_TOKEN')
-API_BASE_URL  = os.getenv('API_BASE_URL')
+BOT_TOKEN    = os.getenv('BOT_TOKEN')
+API_BASE_URL = os.getenv('API_BASE_URL')  # e.g. https://hiapitest.onrender.com/api/v1
 
 if not BOT_TOKEN or not API_BASE_URL:
     print("Error: BOT_TOKEN and API_BASE_URL must be set in .env")
@@ -28,33 +28,32 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return await update.message.reply_text('Usage: /search <anime name>')
 
     query = ' '.join(context.args)
-    raw = {}
-
-    # Call the API (no raise_for_status).
+    # Call the API without raise_for_status
     resp = requests.get(
         f"{API_BASE_URL}/search",
-        params={'query': query}
+        params={'keyword': query}
     )
-    # Try parsing JSON, even on 400/500
+    raw = {}
     try:
         raw = resp.json()
     except ValueError:
-        raw = {}
+        pass
 
-    # If the endpoint gave us a 400 or 500, show “no results”
+    # If HTTP error or success=false, bail out
     if resp.status_code != 200 or not raw.get('success', False):
         logger.error("Search failed (%s): %s", resp.status_code, raw)
-        return await update.message.reply_text(f'No results for \"{query}\".')
+        return await update.message.reply_text(f'No results for "{query}".')
 
-    # Pull the list out
-    data_list = raw.get('data', [])
-    if not isinstance(data_list, list) or not data_list:
-        return await update.message.reply_text(f'No results for \"{query}\".')
+    # Pull the list out of data.response
+    data = raw.get('data', {})
+    results = data.get('response', [])
+    if not results:
+        return await update.message.reply_text(f'No results for "{query}".')
 
-    # Send top 5
-    top5 = data_list[:5]
+    # Show top 5
+    top5 = results[:5]
     lines = [
-        f"{i+1}. {item.get('title','–')} (slug: {item.get('id','–')})"
+        f"{i+1}. {item.get('title', '–')} (slug: {item.get('id', '–')})"
         for i, item in enumerate(top5)
     ]
     await update.message.reply_text(
@@ -73,7 +72,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return await update.message.reply_text('Episode number must be an integer.')
 
     try:
-        # 1. Episodes
+        # 1. Episodes list
         eps_res = requests.get(f"{API_BASE_URL}/episodes/{anime_slug}")
         eps_res.raise_for_status()
         episodes = eps_res.json()
@@ -86,7 +85,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f'Episode {ep_num} not found for {anime_slug}.'
             )
 
-        # 2. Servers
+        # 2. Servers list
         srv_res = requests.get(
             f"{API_BASE_URL}/servers",
             params={'id': ep_item['id']}
@@ -99,7 +98,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not hd2:
             return await update.message.reply_text('HD-2 server not available.')
 
-        # 3. Stream & subtitles
+        # 3. Stream + subtitles
         str_res = requests.get(
             f"{API_BASE_URL}/stream",
             params={'id': ep_item['id'], 'server': hd2['name'], 'type': 'sub'}
@@ -107,13 +106,13 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         str_res.raise_for_status()
         data = str_res.json()
 
-        # Download link
+        # Send download link
         await update.message.reply_text(
             f"📥 *Download Link*:\n{data['streamingLink']}",
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Subtitles
+        # Send subtitles
         subs = data.get('subtitles', [])
         if subs:
             for sub in subs:
