@@ -98,29 +98,29 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Pick by order
         ep_item = episodes_list[ep_num - 1]
 
-        # 2) Servers
+        # 2) Fetch servers and pick HD-2 by its index=1
         srv_res = requests.get(
             f"{API_BASE_URL}/servers",
             params={'id': ep_item['id']}
         )
         srv_res.raise_for_status()
-        hd2 = next(
-            (s for s in srv_res.json().get('sub', []) if s.get('name') == 'HD-2'),
-            None
-        )
+        sub_servers = srv_res.json().get('sub', [])
+        # HD-2 is always the one with index === 1
+        hd2 = next((s for s in sub_servers if s.get('index') == 1), None)
         if not hd2:
             return await update.message.reply_text(
                 'HD-2 server not available for this episode.'
             )
 
-        # 3) Stream + subtitles
+        # 3) Fetch stream + subtitles using the server.id that the API expects
         str_res = requests.get(
             f"{API_BASE_URL}/stream",
-            params={'id': ep_item['id'], 'server': hd2['name'], 'type': 'sub'}
+            params={
+              'id':     ep_item['id'],
+              'server': hd2['id'],    # !!! use hd2['id'], not hd2['name']
+              'type':   'sub'
+            }
         )
-        str_res.raise_for_status()
-        stream_data = str_res.json()
-
         # Send download link
         await update.message.reply_text(
             f"📥 *Download Link*:\n{stream_data['streamingLink']}",
