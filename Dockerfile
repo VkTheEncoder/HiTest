@@ -1,7 +1,6 @@
-FROM node:18-alpine
+FROM python:3.11-slim
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --production
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN npm run build
-CMD ["node", "dist/src/bot.js"]
+CMD ["python", "src/bot.py"]
