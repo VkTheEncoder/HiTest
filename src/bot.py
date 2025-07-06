@@ -15,77 +15,76 @@ if not BOT_TOKEN or not API_BASE_URL:
     print("Error: BOT_TOKEN and API_BASE_URL must be set in .env")
     exit(1)
 
-# Logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# === /search handler ===
+# === /search handler (unchanged) ===
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         return await update.message.reply_text('Usage: /search <anime name>')
 
     query = ' '.join(context.args)
-    # Call the API without raise_for_status
-    resp = requests.get(
-        f"{API_BASE_URL}/search",
-        params={'keyword': query}
-    )
+    # note: this API expects `keyword`
+    resp = requests.get(f"{API_BASE_URL}/search", params={'keyword': query})
     raw = {}
     try:
         raw = resp.json()
     except ValueError:
         pass
 
-    # If HTTP error or success=false, bail out
     if resp.status_code != 200 or not raw.get('success', False):
         logger.error("Search failed (%s): %s", resp.status_code, raw)
         return await update.message.reply_text(f'No results for "{query}".')
 
-    # Pull the list out of data.response
-    data = raw.get('data', {})
-    results = data.get('response', [])
-    if not results:
+    results = raw.get('data', {}).get('response', [])
+    if not isinstance(results, list) or not results:
         return await update.message.reply_text(f'No results for "{query}".')
 
-    # Show top 5
     top5 = results[:5]
     lines = [
-        f"{i+1}. {item.get('title', '–')} (slug: {item.get('id', '–')})"
+        f"{i+1}. {item.get('title','–')} (slug: {item.get('id','–')})"
         for i, item in enumerate(top5)
     ]
     await update.message.reply_text(
         f"Top results for '{query}':\n\n" + "\n".join(lines)
     )
 
-# === /get handler ===
+# === /get handler (with slug‐cleaning) ===
 async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) < 2:
-        return await update.message.reply_text('Usage: /get <animeSlug> <episodeNumber>')
+        return await update.message.reply_text(
+            'Usage: /get <animeSlug> <episodeNumber>'
+        )
 
-    anime_slug = context.args[0]
+    # Strip off any query‐string from the slug
+    raw_slug = context.args[0]
+    anime_slug = raw_slug.split('?', 1)[0]
     try:
         ep_num = int(context.args[1])
     except ValueError:
         return await update.message.reply_text('Episode number must be an integer.')
 
     try:
-        # 1. Episodes list
+        # 1) Fetch episodes list
         eps_res = requests.get(f"{API_BASE_URL}/episodes/{anime_slug}")
         eps_res.raise_for_status()
         episodes = eps_res.json()
+
+        # Find the matching episode object
         ep_item = next(
             (e for e in episodes if f"Episode {ep_num}" in e.get('title', "")),
             None
         )
         if not ep_item:
             return await update.message.reply_text(
-                f'Episode {ep_num} not found for {anime_slug}.'
+                f'Episode {ep_num} not found for "{anime_slug}".'
             )
 
-        # 2. Servers list
+        # 2) Fetch available servers
         srv_res = requests.get(
             f"{API_BASE_URL}/servers",
             params={'id': ep_item['id']}
@@ -96,12 +95,18 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             None
         )
         if not hd2:
-            return await update.message.reply_text('HD-2 server not available.')
+            return await update.message.reply_text(
+                'HD-2 server not available for this episode.'
+            )
 
-        # 3. Stream + subtitles
+        # 3) Fetch stream link + subtitles
         str_res = requests.get(
             f"{API_BASE_URL}/stream",
-            params={'id': ep_item['id'], 'server': hd2['name'], 'type': 'sub'}
+            params={
+                'id': ep_item['id'],
+                'server': hd2['name'],
+                'type': 'sub'
+            }
         )
         str_res.raise_for_status()
         data = str_res.json()
@@ -112,7 +117,7 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Send subtitles
+        # Send any English subtitles
         subs = data.get('subtitles', [])
         if subs:
             for sub in subs:
@@ -125,7 +130,9 @@ async def get_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     except Exception as e:
         logger.error("Get error: %s", e)
-        await update.message.reply_text('An error occurred. Please try again later.')
+        await update.message.reply_text(
+            'An error occurred while fetching the episode. Please try again later.'
+        )
 
 # === Main ===
 if __name__ == '__main__':
